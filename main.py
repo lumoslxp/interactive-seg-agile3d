@@ -73,7 +73,7 @@ def get_args_parser():
     parser.add_argument('--lr_drop', default=[1000], type=int, nargs='+')
     parser.add_argument('--epochs', default=1600, type=int)
     parser.add_argument('--val_epochs', default=50, type=int)
-    parser.add_argument('--batch_size', default=10, type=int)
+    parser.add_argument('--batch_size', default=5, type=int)
     parser.add_argument('--val_batch_size', default=1, type=int)
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
@@ -85,7 +85,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=2, type=int)
-    parser.add_argument('--resume', default='/mnt/cloud_disk/lxp/AGILE3D-main/output/2024-10-13-06-51-08/checkpoint0579.pth', help='resume from checkpoint')
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--max_num_clicks', default=20, help='maximum number of clicks per object on average', type=int)
 
     parser.add_argument('--job_name', default='train_multi_obj_scannet40——debug', type=str)
@@ -294,7 +294,7 @@ if __name__ == '__main__':
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         Path(args.valResults_dir).mkdir(parents=True, exist_ok=True)
 
-    world_size = 1
+    world_size = 7
     mp.spawn(
         main,
         args=(world_size, args),

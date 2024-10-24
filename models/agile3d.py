@@ -13,7 +13,7 @@ from models.modules.attention_block import *
 from models.position_embedding import PositionEmbeddingCoordsSine, PositionalEncoding3D, PositionalEncoding1D
 from torch.cuda.amp import autocast
 from .backbone import build_backbone
-
+import MinkowskiEngine as ME
 import itertools
 
 class Agile3d(nn.Module):
@@ -137,6 +137,11 @@ class Agile3d(nn.Module):
         self.decoder_norm = nn.LayerNorm(hidden_dim)
         self.time_encode = PositionalEncoding1D(hidden_dim, 200)
 
+        self.mask_pcd_features_fusion = nn.Sequential(
+            nn.Linear(2*hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
     def get_pos_encs(self, coords):
         pos_encodings_pcd = []
@@ -180,11 +185,24 @@ class Agile3d(nn.Module):
 
         return pcd_features, aux, coordinates, pos_encodings_pcd
 
+    def forward_features_fusion(self,pcd_features, mask_features):
+        pcd_features_tensor = pcd_features.F
+        mask_features_tensor = mask_features
+        fusion_features_tensor = torch.cat([pcd_features_tensor, mask_features_tensor], dim=-1)
+        fusion_features_tensor = self.mask_pcd_features_fusion(fusion_features_tensor)
+        sparse_fusion_features = me.SparseTensor(features=fusion_features_tensor,
+                                          coordinate_manager=pcd_features.coordinate_manager,
+                                          coordinate_map_key=pcd_features.coordinate_map_key,
+                                          device=pcd_features.device)
+
+        return sparse_fusion_features
+    
     def forward_mask(self, pcd_features, aux, coordinates, pos_encodings_pcd, click_idx=None, click_time_idx=None):
 
         batch_size = pcd_features.C[:,0].max() + 1
 
         predictions_mask = [[] for i in range(batch_size)]
+        auto_mask_features = [[] for i in range(batch_size)]
 
         bg_learn_queries = self.bg_query_feat.weight.unsqueeze(0).repeat(batch_size, 1, 1)
         bg_learn_query_pos = self.bg_query_pos.weight.unsqueeze(0).repeat(batch_size, 1, 1)
@@ -311,6 +329,8 @@ class Agile3d(nn.Module):
                         query_pos=pos_enc # [num_points, 128]
                     ) # [num_points, 128]
 
+                    auto_mask_features[b].append(src_pcd)
+
                     fg_queries, bg_queries = queries.split([fg_query_num, bg_query_num], 0)
 
                     outputs_mask, attn_mask = self.mask_module(
@@ -325,12 +345,12 @@ class Agile3d(nn.Module):
                     refine_time += 1
 
         predictions_mask = [list(i) for i in zip(*predictions_mask)]
-        
-        
+        auto_mask_features = [list(i) for i in zip(*auto_mask_features)]
         
         out= {
             'pred_masks': predictions_mask[-1],
-            'backbone_features': pcd_features
+            'backbone_features': pcd_features,
+            'auto_mask_features': auto_mask_features[-1]
         }
 
         if self.aux:
