@@ -8,10 +8,13 @@ import MinkowskiEngine.MinkowskiOps as me
 from MinkowskiEngine.MinkowskiPooling import MinkowskiAvgPooling
 import numpy as np
 from torch.nn import functional as F
+from models.mamba_block import MixerModel, mamba_block
 from models.modules.common import conv
 from models.modules.attention_block import *
 from models.position_embedding import PositionEmbeddingCoordsSine, PositionalEncoding3D, PositionalEncoding1D
 from torch.cuda.amp import autocast
+
+from utils.order import get_hilbert_order
 from .backbone import build_backbone
 import MinkowskiEngine as ME
 import itertools
@@ -142,6 +145,11 @@ class Agile3d(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
+        self.blocks = MixerModel(d_model=hidden_dim,
+                                    n_layer=4,
+                                    rms_norm=False,
+                                    drop_out_in_block=0.,
+                                    drop_path=0.)
 
     def get_pos_encs(self, coords):
         pos_encodings_pcd = []
@@ -185,7 +193,7 @@ class Agile3d(nn.Module):
 
         return pcd_features, aux, coordinates, pos_encodings_pcd
 
-    def forward_features_fusion(self,pcd_features, mask_features):
+    def forward_features_fusion_mlp(self,pcd_features, mask_features):
         pcd_features_tensor = pcd_features.F
         mask_features_tensor = mask_features
         fusion_features_tensor = torch.cat([pcd_features_tensor, mask_features_tensor], dim=-1)
@@ -196,6 +204,39 @@ class Agile3d(nn.Module):
                                           device=pcd_features.device)
 
         return sparse_fusion_features
+    
+    def forward_features_mamba(self,pcd_features, pos_encodings_pcd):
+        batch_size = pcd_features.C[:,0].max() + 1
+        batch_coords = pcd_features.coordinates
+        batch_idx = batch_coords[:,0]
+        batch_centers = batch_coords[:,1:]
+        refined_features_list = []
+        for idx in range(batch_size):
+            sample_mask = batch_idx == idx
+            if pcd_features.F.is_cuda:
+                src_pcd = pcd_features.decomposed_features[idx]
+            else:
+                src_pcd = pcd_features.F
+            center = batch_centers[sample_mask]
+            pos = pos_encodings_pcd[4][0][idx]
+
+            Hilbert_order = get_hilbert_order(center)
+            inverse_Hilbert_order = torch.argsort(Hilbert_order, dim=0)
+            src_pcd = src_pcd.gather(dim=0, index=torch.tile(Hilbert_order, (1, src_pcd.shape[-1])))
+            pos = pos.gather(dim=0, index=torch.tile(Hilbert_order, (1, pos.shape[-1])))
+
+            refined_features = self.blocks(src_pcd.unsqueeze(0), pos.unsqueeze(0))
+            refined_features = refined_features.squeeze()
+            refined_features = refined_features.gather(dim=0, index=torch.tile(inverse_Hilbert_order, (1, refined_features.shape[-1])))
+            
+            refined_features_list.append(refined_features)
+        refined_features_tensor = torch.cat(refined_features_list, dim=0)
+        refined_features_features = me.SparseTensor(features=refined_features_tensor,
+                                          coordinate_manager=pcd_features.coordinate_manager,
+                                          coordinate_map_key=pcd_features.coordinate_map_key,
+                                          device=pcd_features.device)
+        
+        return refined_features_features
     
     def forward_mask(self, pcd_features, aux, coordinates, pos_encodings_pcd, click_idx=None, click_time_idx=None):
 
