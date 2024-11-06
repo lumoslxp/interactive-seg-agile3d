@@ -10,7 +10,7 @@ import os
 import sys
 import time
 from typing import Iterable
-
+import torch.distributed as dist
 
 import numpy as np
 import random
@@ -79,7 +79,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         #########  2. pre interactive sampling  #########
 
         current_num_iter = 0
-        num_forward_iters = random.randint(0, 19)
+        num_forward_iters = random.randint(2, 19)
         
         while current_num_iter <= num_forward_iters:
             if current_num_iter == 0:
@@ -90,7 +90,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             else:
                 model.train()
                 pcd_features, aux, coordinates, pos_encodings_pcd = model.forward_backbone(data, raw_coordinates=raw_coords)
-                auto_mask_features = model.forward_features_fusion(pcd_features, auto_mask_features)
+                auto_mask_features = model.forward_features_fusion_mamba(pcd_features, auto_mask_features,pos_encodings_pcd)
                 outputs = model.forward_mask(auto_mask_features, aux, coordinates, pos_encodings_pcd, 
                                                     click_idx=click_idx, click_time_idx=click_time_idx)
                 auto_mask_features = outputs['auto_mask_features']
@@ -192,8 +192,7 @@ def evaluate(model, criterion, data_loader, args, epoch, device,rank=0):
     instance_counter = 0
     results_file = os.path.join(args.valResults_dir, 'val_results_epoch_' + str(epoch) + '.csv')
     f = open(results_file, 'w')
-
-    for batched_inputs in metric_logger.log_every(data_loader, 10, header,rank =rank):
+    for batched_inputs in metric_logger.log_every(data_loader, 40, header,rank =rank):
 
         coords, raw_coords, feats, labels, labels_full, inverse_map, click_idx, scene_name, num_obj, instances= batched_inputs
         coords = coords.to(device)
@@ -230,9 +229,9 @@ def evaluate(model, criterion, data_loader, args, epoch, device,rank=0):
                 auto_mask_features = pcd_features.F
                 pred = [torch.zeros(l.shape).to(device) for l in labels]
             else:
-                auto_mask_features = model.forward_features_fusion(pcd_features, auto_mask_features)
-                outputs = model.forward_mask(auto_mask_features, aux, coordinates, pos_encodings_pcd,
-                                             click_idx=click_idx, click_time_idx=click_time_idx)
+                auto_mask_features = model.forward_features_fusion_mamba(pcd_features, auto_mask_features,pos_encodings_pcd)
+                outputs = model.forward_mask(auto_mask_features, aux, coordinates, pos_encodings_pcd, 
+                                                    click_idx=click_idx, click_time_idx=click_time_idx)
                 auto_mask_features = outputs['auto_mask_features']
                 auto_mask_features = torch.cat(auto_mask_features,dim=0)
                 pred_logits = outputs['pred_masks']
@@ -298,7 +297,7 @@ def evaluate(model, criterion, data_loader, args, epoch, device,rank=0):
             current_num_clicks += new_clicks_num
 
         instance_counter += len(num_obj)
-
+    
     f.close()
     evaluator = EvaluatorMO(args.val_list, results_file, [0.5,0.65,0.8,0.85,0.9])
     results_dict = evaluator.eval_results()

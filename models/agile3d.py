@@ -8,6 +8,7 @@ import MinkowskiEngine.MinkowskiOps as me
 from MinkowskiEngine.MinkowskiPooling import MinkowskiAvgPooling
 import numpy as np
 from torch.nn import functional as F
+from models.fusion_mamba import FusionMamba
 from models.mamba_block import MixerModel, mamba_block
 from models.modules.common import conv
 from models.modules.attention_block import *
@@ -150,6 +151,7 @@ class Agile3d(nn.Module):
                                     rms_norm=False,
                                     drop_out_in_block=0.,
                                     drop_path=0.)
+        self.mamba_fusion_blocks = FusionMamba(hidden_dim)
 
     def get_pos_encs(self, coords):
         pos_encodings_pcd = []
@@ -204,7 +206,44 @@ class Agile3d(nn.Module):
                                           device=pcd_features.device)
 
         return sparse_fusion_features
-    
+    def forward_features_fusion_mamba(self,pcd_features, mask_features, pos_encodings_pcd):
+        batch_size = pcd_features.C[:,0].max() + 1
+        batch_coords = pcd_features.coordinates
+        batch_idx = batch_coords[:,0]
+        batch_centers = batch_coords[:,1:]
+        fusion_features_list = []
+        for idx in range(batch_size):
+            sample_mask = batch_idx == idx
+            if pcd_features.F.is_cuda:
+                src_pcd = pcd_features.decomposed_features[idx]
+            else:
+                src_pcd = pcd_features.F
+            sample_mask_features = mask_features[sample_mask]
+            center = batch_centers[sample_mask]
+            pos = pos_encodings_pcd[4][0][idx]
+
+            Hilbert_order = get_hilbert_order(center)
+            inverse_Hilbert_order = torch.argsort(Hilbert_order, dim=0)
+            src_pcd = src_pcd.gather(dim=0, index=torch.tile(Hilbert_order, (1, src_pcd.shape[-1])))
+            sample_mask_features = sample_mask_features.gather(dim=0, index=torch.tile(Hilbert_order, (1, sample_mask_features.shape[-1])))
+            pos = pos.gather(dim=0, index=torch.tile(Hilbert_order, (1, pos.shape[-1])))
+
+            src_pcd = src_pcd + pos
+            sample_mask_features = sample_mask_features + pos
+
+            fusion_features = self.mamba_fusion_blocks(src_pcd, sample_mask_features)
+            fusion_features = fusion_features.gather(dim=0, index=torch.tile(inverse_Hilbert_order, (1, fusion_features.shape[-1])))
+            
+            fusion_features_list.append(fusion_features)
+        fusion_features_tensor = torch.cat(fusion_features_list, dim=0)
+        fusion_features_features = me.SparseTensor(features=fusion_features_tensor,
+                                          coordinate_manager=pcd_features.coordinate_manager,
+                                          coordinate_map_key=pcd_features.coordinate_map_key,
+                                          device=pcd_features.device)
+        
+        return fusion_features_features
+
+
     def forward_features_mamba(self,pcd_features, pos_encodings_pcd):
         batch_size = pcd_features.C[:,0].max() + 1
         batch_coords = pcd_features.coordinates
